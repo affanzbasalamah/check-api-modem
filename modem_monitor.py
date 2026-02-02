@@ -1,5 +1,26 @@
-import os
 import sys
+import os
+
+# OPTIMIZATION: Check for help/empty args BEFORE importing heavy libraries
+if __name__ == "__main__":
+    if len(sys.argv) == 1 or sys.argv[1] in ['help', '-h', '--help']:
+        print("""
+HKM0130 Modem Monitor Daemon
+============================
+
+Usage:
+  ./modem_monitor start   : Start the background monitoring daemon.
+  ./modem_monitor stop    : Stop the running daemon.
+  ./modem_monitor help    : Show this help message.
+
+Behavior:
+  - Checks internet connectivity and Operator Name ("Telkomsel") every 6 hours.
+  - Logs activity to /tmp/modem_monitor.log
+  - Exits immediately if any check fails.
+""")
+        sys.exit(0)
+
+# Heavy imports deferred until after help check
 import time
 import signal
 import logging
@@ -11,13 +32,14 @@ import json
 import hmac
 import hashlib
 import base64
+import subprocess
 from requests.adapters import HTTPAdapter
 from urllib3.util.ssl_ import create_urllib3_context
 from urllib3.util.retry import Retry
 
 # Config
 PID_FILE = "/tmp/modem_monitor.pid"
-LOG_FILE = "/tmp/modem_monitor.log" # Changed to /tmp to avoid permission issues after chdir('/')
+LOG_FILE = "/tmp/modem_monitor.log"
 CHECK_INTERVAL = 6 * 3600  # 6 hours
 
 # Setup Logging
@@ -124,13 +146,6 @@ class HKMModemClient:
                 data = r.json()
                 if data.get('retcode') == 0:
                     res = data.get('data', {})
-                    # Parse WAN if needed, but we check raw 'wan_status' first if available.
-                    # Previous probe showed 'rt_wwan_conn_info' has status at index 0.
-                    # But wait, probe output showed "wan_status": "connected" was NOT in the keys list explicitly?
-                    # Ah, I added parsing logic in modem_client.py. I should verify if 'wan_status' is a direct key or parsed.
-                    # Looking at probe output: "rt_wwan_conn_info": "connected,..."
-                    # In modem_client.py I verified, I added parsing.
-                    # I need to replicate that parsing here.
                     
                     wan_info = res.get('rt_wwan_conn_info', '')
                     if wan_info:
@@ -184,6 +199,22 @@ def check_modem_status():
         logging.error(f"Exception during check: {e}")
         return False
 
+def run_loop():
+    """
+    Main daemon loop.
+    """
+    logging.info("Daemon started. Running initial check...")
+    
+    while True:
+        if not check_modem_status():
+            logging.error("Check failed! Exiting daemon.")
+            if os.path.exists(PID_FILE):
+                os.remove(PID_FILE)
+            sys.exit(1)
+            
+        logging.info(f"Sleeping for {CHECK_INTERVAL/3600} hours...")
+        time.sleep(CHECK_INTERVAL)
+
 def daemon_loop_entry():
     """
     Entry point for the background daemon process.
@@ -220,7 +251,6 @@ def start_daemon():
     print("Initial check passed. Starting background daemon...")
 
     # Spawn the daemon process using Popen (Exec, not Fork)
-    # This ensures a clean state for the daemon.
     try:
         # sys.executable points to the bundled executable in PyInstaller
         cmd = [sys.executable] + sys.argv[:1] + ['daemon_loop']
@@ -259,14 +289,18 @@ def stop_daemon():
         print(f"Error stopping daemon: {e}")
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="HKM0130 Modem Monitor Daemon")
+    # The initial check is now handled at the very top of the file.
+    # We just need to parse args here for the actual logic.
+    parser = argparse.ArgumentParser(description="HKM0130 Modem Monitor Daemon", add_help=False)
     parser.add_argument('action', choices=['start', 'stop', 'daemon_loop'], help="Action to perform")
     
-    args = parser.parse_args()
-    
-    if args.action == 'start':
-        start_daemon()
-    elif args.action == 'stop':
-        stop_daemon()
-    elif args.action == 'daemon_loop':
-        daemon_loop_entry()
+    try:
+        args = parser.parse_args()
+        if args.action == 'start':
+            start_daemon()
+        elif args.action == 'stop':
+            stop_daemon()
+        elif args.action == 'daemon_loop':
+            daemon_loop_entry()
+    except SystemExit:
+        pass
