@@ -1,0 +1,272 @@
+import os
+import sys
+import time
+import signal
+import logging
+import argparse
+import requests
+import urllib3
+import ssl
+import json
+import hmac
+import hashlib
+import base64
+from requests.adapters import HTTPAdapter
+from urllib3.util.ssl_ import create_urllib3_context
+from urllib3.util.retry import Retry
+
+# Config
+PID_FILE = "/tmp/modem_monitor.pid"
+LOG_FILE = "/tmp/modem_monitor.log" # Changed to /tmp to avoid permission issues after chdir('/')
+CHECK_INTERVAL = 6 * 3600  # 6 hours
+
+# Setup Logging
+logging.basicConfig(
+    filename=LOG_FILE,
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
+
+# Suppress InsecureRequestWarning
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+class LegacySSLAdapter(HTTPAdapter):
+    def init_poolmanager(self, connections, maxsize, block=False):
+        context = create_urllib3_context()
+        context.set_ciphers('ALL:@SECLEVEL=0')
+        context.check_hostname = False
+        context.verify_mode = ssl.CERT_NONE
+        context.options |= 0x4 # OP_LEGACY_SERVER_CONNECT
+        self.poolmanager = urllib3.poolmanager.PoolManager(
+            num_pools=connections,
+            maxsize=maxsize,
+            block=block,
+            ssl_context=context
+        )
+
+# Embedding HKMModemClient here to ensure it uses 'logging' not 'print' and avoids import issues
+class HKMModemClient:
+    def __init__(self, host="192.168.8.1", password="admin", username="admin"):
+        self.base_url = f"https://{host}"
+        self.username = username
+        self.password = password
+        self.session = requests.Session()
+        
+        retries = Retry(total=5, backoff_factor=1, status_forcelist=[500, 502, 503, 504])
+        self.session.mount('https://', LegacySSLAdapter(max_retries=retries))
+        
+        self.encrypt_enabled = False
+        self.pri_key = None
+        self.timestamp = None
+        self.timestamp_start = 0
+
+    def _hex_hmac_md5(self, key, data):
+        return hmac.new(key.encode('utf-8'), data.encode('utf-8'), hashlib.md5).hexdigest()
+
+    def _update_keys(self):
+        try:
+            r = self.session.post(f"{self.base_url}/goform/sync", verify=False, headers={"Content-Type": "application/x-mgdata"}, timeout=10)
+            val = r.headers.get("X-MG-Private")
+            if val:
+                self.pri_key = val.split("x")[0]
+                self.timestamp = val.split("x")[1]
+                self.timestamp_start = int(time.time())
+                return True
+        except Exception as e:
+            logging.error(f"Error syncing keys: {e}")
+        return False
+
+    def login(self):
+        # 1. Check Encryption (optional)
+        try:
+            r = self.session.get(f"{self.base_url}/config/global/config.xml", verify=False, timeout=5)
+            if '<encrypt>1</encrypt>' in r.text:
+                self.encrypt_enabled = True
+        except:
+            pass
+
+        # 2. Sync Keys
+        if not self._update_keys():
+            logging.error("Failed to sync keys")
+            return False
+
+        # 3. Hash Credentials
+        key_hmac = "0123456789"
+        user_hashed = self._hex_hmac_md5(key_hmac, self.username)
+        pass_hashed = self._hex_hmac_md5(key_hmac, self.password)
+        
+        payload = {
+            "username": user_hashed,
+            "password": pass_hashed
+        }
+        
+        headers = {"Content-Type": "application/json"}
+        try:
+            r = self.session.post(f"{self.base_url}/goform/login", json=payload, headers=headers, verify=False, timeout=10)
+            if r.status_code == 200 and '"retcode":0' in r.text:
+                return True
+        except Exception as e:
+            logging.error(f"Login request failed: {e}")
+            
+        return False
+
+    def get_status(self):
+        keys = [
+            "mnet_sim_status", "mnet_sig_level", "device_battery_level", 
+            "mnet_imsi", "mnet_sysmode", "mnet_operator_name",
+            "sms_unread_count", "device_imei", "mnet_msisdn",
+            "rt_wwan_conn_info", "wan_status"
+        ]
+        payload = {"keys": keys}
+        try:
+            r = self.session.post(f"{self.base_url}/action/get_mgdb_params", json=payload, headers={"Content-Type": "application/json"}, verify=False, timeout=10)
+            if r.status_code == 200:
+                data = r.json()
+                if data.get('retcode') == 0:
+                    res = data.get('data', {})
+                    # Parse WAN if needed, but we check raw 'wan_status' first if available.
+                    # Previous probe showed 'rt_wwan_conn_info' has status at index 0.
+                    # But wait, probe output showed "wan_status": "connected" was NOT in the keys list explicitly?
+                    # Ah, I added parsing logic in modem_client.py. I should verify if 'wan_status' is a direct key or parsed.
+                    # Looking at probe output: "rt_wwan_conn_info": "connected,..."
+                    # In modem_client.py I verified, I added parsing.
+                    # I need to replicate that parsing here.
+                    
+                    wan_info = res.get('rt_wwan_conn_info', '')
+                    if wan_info:
+                        parts = wan_info.split(',')
+                        if len(parts) >= 1:
+                            res['wan_status'] = parts[0] # connected/disconnected
+                    
+                    return res
+        except Exception as e:
+            logging.error(f"Get status failed: {e}")
+            pass
+        return None
+
+def check_modem_status():
+    """
+    Verifies modem connectivity and operator.
+    Returns True if passed, False otherwise.
+    """
+    client = HKMModemClient()
+    
+    try:
+        logging.info("Attempting to login...")
+        if not client.login():
+            logging.error("Login failed.")
+            return False
+            
+        status = client.get_status()
+        if not status:
+            logging.error("Failed to retrieve status.")
+            return False
+            
+        # Verify Connectivity (wan_status)
+        wan_status = status.get('wan_status', '').lower()
+        operator = status.get('mnet_operator_name', '')
+        
+        logging.info(f"Status Check: WAN='{wan_status}', Operator='{operator}'")
+        
+        # Logic Verification
+        if wan_status != 'connected':
+            logging.error(f"Check Failed: WAN status is '{wan_status}' (Expected: 'connected')")
+            return False
+            
+        if operator != 'Telkomsel':
+            logging.error(f"Check Failed: Operator is '{operator}' (Expected: 'Telkomsel')")
+            return False
+            
+        logging.info("Check Passed.")
+        return True
+        
+    except Exception as e:
+        logging.error(f"Exception during check: {e}")
+        return False
+
+def daemon_loop_entry():
+    """
+    Entry point for the background daemon process.
+    """
+    # Write PID
+    pid = os.getpid()
+    with open(PID_FILE, 'w') as f:
+        f.write(str(pid))
+        
+    logging.info(f"Daemon process started with PID {pid}")
+    
+    # Run the loop
+    run_loop()
+
+def start_daemon():
+    if os.path.exists(PID_FILE):
+        print(f"Daemon possibly running (PID file {PID_FILE} exists).")
+        try:
+            with open(PID_FILE, 'r') as f:
+                pid = int(f.read().strip())
+            os.kill(pid, 0)
+            print("Process is alive. Exiting.")
+            sys.exit(1)
+        except OSError:
+            print("Process not found. Removing stale PID file.")
+            os.remove(PID_FILE)
+
+    # First Check (Foreground)
+    print("Running initial connectivity check...")
+    if not check_modem_status():
+        print("Initial check failed! Internet not connected or Operator mismatch. Check /tmp/modem_monitor.log for details.")
+        sys.exit(1)
+
+    print("Initial check passed. Starting background daemon...")
+
+    # Spawn the daemon process using Popen (Exec, not Fork)
+    # This ensures a clean state for the daemon.
+    try:
+        # sys.executable points to the bundled executable in PyInstaller
+        cmd = [sys.executable] + sys.argv[:1] + ['daemon_loop']
+        subprocess.Popen(
+            cmd,
+            start_new_session=True, # Detach from terminal (setsid)
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL
+        )
+        print("Daemon started successfully.")
+    except Exception as e:
+        print(f"Failed to start daemon: {e}")
+        sys.exit(1)
+
+def stop_daemon():
+    if not os.path.exists(PID_FILE):
+        print("Daemon not running (PID file not found).")
+        return
+
+    try:
+        with open(PID_FILE, 'r') as f:
+            pid = int(f.read().strip())
+        
+        os.kill(pid, signal.SIGTERM)
+        print(f"Sent SIGTERM to PID {pid}")
+        
+        time.sleep(1)
+        if os.path.exists(PID_FILE):
+            os.remove(PID_FILE)
+            
+    except ProcessLookupError:
+        print("Process not found. removing PID file.")
+        os.remove(PID_FILE)
+    except Exception as e:
+        print(f"Error stopping daemon: {e}")
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="HKM0130 Modem Monitor Daemon")
+    parser.add_argument('action', choices=['start', 'stop', 'daemon_loop'], help="Action to perform")
+    
+    args = parser.parse_args()
+    
+    if args.action == 'start':
+        start_daemon()
+    elif args.action == 'stop':
+        stop_daemon()
+    elif args.action == 'daemon_loop':
+        daemon_loop_entry()

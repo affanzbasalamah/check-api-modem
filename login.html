@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=1.0,user-scalable=0"/>
+    <link rel="shortcut icon" href="../images/favicon.ico">
+    <title></title>
+    <link rel="stylesheet" href="../css/login.css"/>
+    <script type="text/javascript" src="../lib/jquery-3.5.1.min.js"></script>
+    <script src="../lib/layui/layui.all.js"></script>
+    <script type="text/javascript" src="../lib/json2.js"></script>
+    <script type="text/javascript" src="../js/tools.js"></script>
+    <script type="text/javascript" src="../js/languagemanage.js"></script>
+    <script type="text/javascript" src="../js/md5.js"></script>
+    <script type="text/javascript" src="../js/encryption.js"></script>
+    <script type="text/javascript" src="../js/login.js"></script>
+</head>
+<body>
+        <div class="login_img">
+            <div class="logo">
+            </div>
+            <div class="login_content">
+                <div class="login_button">
+                    <div class="login_text">
+                        <h3 id="loginTitleStr"></h3>
+                    </div>
+                    <form class="login-input" method="post">
+                        <table>
+                            <tr>
+                                <td>
+                                    <h2 id="usernameStr"></h2>
+                                    <input type="text" name="username" class="psd" id="username">
+                                </td>
+                            </tr>
+                            <tr>
+                                <td>
+                                    <h2 id="passwordStr"></h2>
+                                    <input type="password" name="password" class="psd" id="password" maxlength="63"/>
+                                    <img src="../images/hide.png" alt="" id="showPwd24" class="showPwd"/>
+                                </td>
+                            </tr>
+                            <tr>
+                                <td>
+                                    <input type="button" id="login"  class="login_btn">
+                                </td>
+                            </tr>
+                            <tr class= "error-tips">
+                              <td>
+                                    <span id="error-tips" style="color:red"></span>
+                              </td>
+                            </tr>
+                            <tr>
+                                <td>
+                                    <div class="for_psd">
+                                        <a href="javascript:;" id="alertBtn" ></a>
+                                    </div>
+                                </td>
+                            </tr>
+                        </table>
+                    </form>
+                </div>
+            </div>
+        </div>
+    </body>
+</html>
