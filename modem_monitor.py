@@ -75,7 +75,8 @@ class HKMModemClient:
         self.password = password
         self.session = requests.Session()
         
-        retries = Retry(total=5, backoff_factor=1, status_forcelist=[500, 502, 503, 504])
+        # Reduced retries to avoid long hangs when unreachable
+        retries = Retry(total=1, backoff_factor=1, status_forcelist=[500, 502, 503, 504])
         self.session.mount('https://', LegacySSLAdapter(max_retries=retries))
         
         self.encrypt_enabled = False
@@ -88,7 +89,8 @@ class HKMModemClient:
 
     def _update_keys(self):
         try:
-            r = self.session.post(f"{self.base_url}/goform/sync", verify=False, headers={"Content-Type": "application/x-mgdata"}, timeout=10)
+            # 5s timeout
+            r = self.session.post(f"{self.base_url}/goform/sync", verify=False, headers={"Content-Type": "application/x-mgdata"}, timeout=5)
             val = r.headers.get("X-MG-Private")
             if val:
                 self.pri_key = val.split("x")[0]
@@ -102,7 +104,8 @@ class HKMModemClient:
     def login(self):
         # 1. Check Encryption (optional)
         try:
-            r = self.session.get(f"{self.base_url}/config/global/config.xml", verify=False, timeout=5)
+            # Fast timeout for initial check
+            r = self.session.get(f"{self.base_url}/config/global/config.xml", verify=False, timeout=3)
             if '<encrypt>1</encrypt>' in r.text:
                 self.encrypt_enabled = True
         except:
@@ -125,7 +128,7 @@ class HKMModemClient:
         
         headers = {"Content-Type": "application/json"}
         try:
-            r = self.session.post(f"{self.base_url}/goform/login", json=payload, headers=headers, verify=False, timeout=10)
+            r = self.session.post(f"{self.base_url}/goform/login", json=payload, headers=headers, verify=False, timeout=5)
             if r.status_code == 200 and '"retcode":0' in r.text:
                 return True
         except Exception as e:
@@ -142,7 +145,7 @@ class HKMModemClient:
         ]
         payload = {"keys": keys}
         try:
-            r = self.session.post(f"{self.base_url}/action/get_mgdb_params", json=payload, headers={"Content-Type": "application/json"}, verify=False, timeout=10)
+            r = self.session.post(f"{self.base_url}/action/get_mgdb_params", json=payload, headers={"Content-Type": "application/json"}, verify=False, timeout=5)
             if r.status_code == 200:
                 data = r.json()
                 if data.get('retcode') == 0:
