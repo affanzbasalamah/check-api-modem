@@ -253,16 +253,64 @@ def start_daemon():
 
     # Spawn the daemon process using Popen (Exec, not Fork)
     try:
-        # sys.executable points to the bundled executable in PyInstaller
-        cmd = [sys.executable] + sys.argv[:1] + ['daemon_loop']
-        subprocess.Popen(
+        # Check if running as PyInstaller frozen binary
+        if getattr(sys, 'frozen', False):
+            # sys.executable is the binary itself
+            # We just need to pass the argument
+            cmd = [sys.executable, 'daemon_loop']
+        else:
+            # Running as script
+            # sys.executable is python interpreter
+            # sys.argv[0] is the script path
+            cmd = [sys.executable, sys.argv[0], 'daemon_loop']
+        
+        # We redirect stdout/stderr to files or DEVNULL to detach completely
+        # But we want to check for immediate errors.
+        # Let's keep stderr captured for a moment to print if it fails.
+        proc = subprocess.Popen(
             cmd,
             start_new_session=True, # Detach from terminal (setsid)
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL
+            stderr=subprocess.PIPE # Capture stderr to debug startup
         )
-        print("Daemon started successfully.")
+        
+        # Wait a moment to see if it crashes immediately
+        try:
+            # Wait up to 2 seconds
+            stderr_out = ""
+            try:
+                # We can't use proc.wait(timeout) easily with start_new_session completely detached 
+                # effectively if we want to read stderr pipe without blocking forever.
+                # But since it's a daemon, it SHOULD keep running.
+                # If it exits, communicate() returns quickly.
+                # If it runs, Communicate() would block forever if we don't use timeout.
+                outs, errs = proc.communicate(timeout=2)
+                # If we are here, process finished (crashed)
+                stderr_out = errs.decode('utf-8') if errs else ""
+            except subprocess.TimeoutExpired:
+                # Process is still running after 2 seconds! This is GOOD.
+                # We can stop reading stderr (it's detaching)
+                pass
+
+            if proc.poll() is not None:
+                # Process died
+                print(f"Error: Daemon process died immediately with code {proc.returncode}.")
+                if stderr_out:
+                    print(f"Error output: {stderr_out.strip()}")
+                else:
+                    # Try reading stderr again if we timed out previously? No, communicate handles it.
+                    pass
+                sys.exit(1)
+            else:
+                # Process is running
+                print(f"Daemon started successfully.")
+                print(f"PID: {proc.pid}")
+                print(f"Log: {LOG_FILE}")
+                
+        except Exception as e:
+            print(f"Error monitoring daemon startup: {e}")
+            
     except Exception as e:
         print(f"Failed to start daemon: {e}")
         sys.exit(1)
